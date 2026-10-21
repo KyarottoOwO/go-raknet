@@ -37,6 +37,15 @@ type Conn struct {
 	// connection. The rtt is measured in nanoseconds.
 	rtt atomic.Int64
 
+	// pongRTT is the smoothed round trip time measured from the connected
+	// ping sent periodically as a keepalive and the connected pong that
+	// answers it, in nanoseconds. The other end answers a ping from its
+	// network thread instead of from its acknowledgement tick, so this figure
+	// tracks the wire round trip much more closely than the resend based
+	// estimate above, which carries up to a tick of acknowledgement batching
+	// on top of the actual network time.
+	pongRTT atomic.Int64
+
 	closing atomic.Int64
 
 	ctx        context.Context
@@ -378,11 +387,46 @@ func (conn *Conn) SetWriteDeadline(time.Time) error { return ErrNotSupported }
 // SetDeadline is unimplemented. It always returns ErrNotSupported.
 func (conn *Conn) SetDeadline(time.Time) error { return ErrNotSupported }
 
-// Latency returns a rolling average of rtt between the sending and the
-// receiving end of the connection. The rtt returned is updated continuously
-// and is half the average round trip time (RTT).
+// Latency returns the latency between the sending and the receiving end of
+// the connection. It is half the round trip time (RTT), which is the contract
+// every caller of this method works against.
+//
+// The figure prefers the connected pong estimate, which the other end answers
+// from its network thread: that makes it the closest thing to the plain wire
+// round trip an ICMP ping would measure. The resend based estimate stays the
+// answer until the first pong of the connection arrives, and after that it is
+// no longer consulted: a connection that has stopped answering pings has
+// bigger problems than a stale ping figure.
 func (conn *Conn) Latency() time.Duration {
+	if v := conn.pongRTT.Load(); v > 0 {
+		return time.Duration(v / 2)
+	}
 	return time.Duration(conn.rtt.Load() / 2)
+}
+
+// recordPongRTT folds a connected pong round trip, given in milliseconds,
+// into the smoothed estimate. The pong carries back the timestamp the ping
+// was stamped with, so the difference to the local clock now is the whole
+// round trip: out, through the other end's network thread, and back.
+//
+// The fold is an exponentially weighted average favouring the previous value
+// three to one, so one delayed pong - one that sat behind a burst of game
+// traffic on either end - moves the figure by a quarter of its excess rather
+// than replacing it.
+func (conn *Conn) recordPongRTT(ms int64) {
+	if ms < 0 {
+		// A pong stamped later than our own clock is a queueing artefact, not
+		// a measurement. Dropping it keeps the estimate sane without touching
+		// the average.
+		return
+	}
+	sample := int64(time.Duration(ms) * time.Millisecond)
+	prev := conn.pongRTT.Load()
+	if prev <= 0 {
+		conn.pongRTT.Store(sample)
+		return
+	}
+	conn.pongRTT.Store((prev*3 + sample) / 4)
 }
 
 // send encodes an encoding.BinaryMarshaler and writes it to the Conn.

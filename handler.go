@@ -176,7 +176,7 @@ func (h listenerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, e
 	case message.IDConnectedPing:
 		return true, handleConnectedPing(conn, b[1:])
 	case message.IDConnectedPong:
-		return true, handleConnectedPong(b[1:])
+		return true, handleConnectedPong(conn, b[1:])
 	case message.IDDisconnectNotification:
 		conn.closeImmediately()
 		return true, nil
@@ -241,7 +241,7 @@ func (h dialerConnectionHandler) handle(conn *Conn, b []byte) (handled bool, err
 	case message.IDConnectedPing:
 		return true, handleConnectedPing(conn, b[1:])
 	case message.IDConnectedPong:
-		return true, handleConnectedPong(b[1:])
+		return true, handleConnectedPong(conn, b[1:])
 	case message.IDDisconnectNotification:
 		conn.closeImmediately()
 		return true, nil
@@ -285,7 +285,13 @@ func handleConnectedPing(conn *Conn, b []byte) error {
 
 // handleConnectedPong handles a connected pong packet inside of buffer b. An
 // error is returned if the packet was invalid.
-func handleConnectedPong(b []byte) error {
+//
+// The pong answers a connected ping this connection sent as a keepalive, and
+// it carries back the timestamp that ping was stamped with. The difference to
+// the local clock is the whole round trip, measured over the other end's
+// network thread rather than over its acknowledgement tick, so it is recorded:
+// this is the figure Latency serves, and it tracks a plain ICMP ping closely.
+func handleConnectedPong(conn *Conn, b []byte) error {
 	pk := &message.ConnectedPong{}
 	if err := pk.UnmarshalBinary(b); err != nil {
 		return fmt.Errorf("read CONNECTED_PONG: %w", err)
@@ -293,7 +299,6 @@ func handleConnectedPong(b []byte) error {
 	if pk.PingTime > timestamp() {
 		return fmt.Errorf("handle CONNECTED_PONG: timestamp is in the future")
 	}
-	// We don't actually use the ConnectedPong to measure rtt. It is too
-	// unreliable and doesn't give a good idea of the connection quality.
+	conn.recordPongRTT(timestamp() - pk.PingTime)
 	return nil
 }
