@@ -37,13 +37,13 @@ type Conn struct {
 	// connection. The rtt is measured in nanoseconds.
 	rtt atomic.Int64
 
-	// pongRTT is the smoothed round trip time measured from the connected
-	// ping sent periodically as a keepalive and the connected pong that
-	// answers it, in nanoseconds. The other end answers a ping from its
-	// network thread instead of from its acknowledgement tick, so this figure
-	// tracks the wire round trip much more closely than the resend based
-	// estimate above, which carries up to a tick of acknowledgement batching
-	// on top of the actual network time.
+	// pongRTT is the round trip time measured from the connected ping sent
+	// periodically as a keepalive and the connected pong that answers it, in
+	// nanoseconds. The other end answers a ping from its network thread
+	// instead of from its acknowledgement tick, so this figure tracks the wire
+	// round trip much more closely than the resend based estimate above, which
+	// carries up to a tick of acknowledgement batching on top of the actual
+	// network time.
 	pongRTT atomic.Int64
 
 	closing atomic.Int64
@@ -404,29 +404,23 @@ func (conn *Conn) Latency() time.Duration {
 	return time.Duration(conn.rtt.Load() / 2)
 }
 
-// recordPongRTT folds a connected pong round trip, given in milliseconds,
-// into the smoothed estimate. The pong carries back the timestamp the ping
-// was stamped with, so the difference to the local clock now is the whole
+// recordPongRTT records the round trip of a connected pong, given in
+// milliseconds, as the latest reading. The pong carries back the timestamp the
+// ping was stamped with, so the difference to the local clock now is the whole
 // round trip: out, through the other end's network thread, and back.
 //
-// The fold is an exponentially weighted average favouring the previous value
-// three to one, so one delayed pong - one that sat behind a burst of game
-// traffic on either end - moves the figure by a quarter of its excess rather
-// than replacing it.
+// The sample is kept raw rather than folded into an average: the reading is
+// meant to track a plain terminal ping, which reports every probe on its own,
+// so a figure that lags a spike by a couple of probes is a worse answer than
+// the spike itself.
 func (conn *Conn) recordPongRTT(ms int64) {
 	if ms < 0 {
 		// A pong stamped later than our own clock is a queueing artefact, not
-		// a measurement. Dropping it keeps the estimate sane without touching
-		// the average.
+		// a measurement. Dropping it keeps the latest reading sane without
+		// touching anything.
 		return
 	}
-	sample := int64(time.Duration(ms) * time.Millisecond)
-	prev := conn.pongRTT.Load()
-	if prev <= 0 {
-		conn.pongRTT.Store(sample)
-		return
-	}
-	conn.pongRTT.Store((prev*3 + sample) / 4)
+	conn.pongRTT.Store(int64(time.Duration(ms) * time.Millisecond))
 }
 
 // send encodes an encoding.BinaryMarshaler and writes it to the Conn.
